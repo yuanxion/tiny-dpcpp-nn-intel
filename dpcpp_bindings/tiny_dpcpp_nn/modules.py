@@ -343,6 +343,12 @@ class Network(Module):
             self.width,
         )
 
+    def reset_weights(self, weight_params):
+        initial_params = self.tnn_module.initial_params(weight_params.to(self.device))
+        self.params = torch.nn.Parameter(
+            initial_params.to(self.device), requires_grad=True
+        )
+
 
 class NetworkWithInputEncoding(Module):
     def __init__(
@@ -399,6 +405,12 @@ class NetworkWithInputEncoding(Module):
             self.output_activation,
             self.encoding_config,
             self.width,
+        )
+
+    def reset_weights(self, model_params):
+        initial_params = self.tnn_module.initial_params(model_params.to(self.device))
+        self.params = torch.nn.Parameter(
+            initial_params.to(self.device), requires_grad=True
         )
 
 
