@@ -46,6 +46,7 @@ from common import read_image, write_image, ROOT_DIR
 
 DATA_DIR = os.path.join(ROOT_DIR, "data")
 IMAGES_DIR = os.path.join(DATA_DIR, "images")
+save_path = 'dump_cuda'
 
 class Image(torch.nn.Module):
     def __init__(self, filename, device):
@@ -138,7 +139,6 @@ def pad_model_param(model_param):
 
 def save_networkwithencoding(model_param, model_param_grad, model_param_update=None, encoding_input=None, network_output=None, targets=None, loss=None, step=-1):
     print(f'CUDA save_networkwithencoding {step = }')
-    save_path = 'dump_cuda'
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
@@ -167,27 +167,12 @@ def save_networkwithencoding(model_param, model_param_grad, model_param_update=N
 
 def load_networkwithencoding(model, loss=None, step=-1):
     #print(f'XPU load_networkwithencoding {step = }')
-    save_path = 'dump_cuda'
-
-    if step == -1:
-        ref_tensor = torch.load(f'{save_path}/networkwithencoding-step.pth')
-    else:
-        if not os.path.exists(f'{save_path}/networkwithencoding-step{step}.pth'):
-            print(f'Error: {save_path}/networkwithencoding-step{step}.pth file does not existed, leaving...')
-            sys.exit(-1)
-        ref_tensor = torch.load(f'{save_path}/networkwithencoding-step{step}.pth')
-
-    for k,v in ref_tensor.items():
-        if isinstance(v, torch.Tensor):
-            ref_tensor[k] = v.to(dtype=torch.float).to(device)
 
     model_param_ref = ref_tensor['model_param']
     model_param_grad_ref = ref_tensor['model_param_grad']
     model_param_update_ref = ref_tensor['model_param_update']
 
-    model.reset_weights(model_param_ref)
-
-    print(f'--> {step = } compare model param after reset_weights')
+    print(f'--> {step = } compare model param after reset weights')
     all_weights = model.get_reshaped_params(datatype=model.params.data.dtype)
     model_param = model.params.data.clone()
     compare_model_param(all_weights, model_param_ref, model_param)
@@ -214,32 +199,32 @@ def compare_model_param(all_weights, param_ref, model_param=None):
     # compare Network weights which has padding
     param = all_weights[0][:32, :32].clone()
     param = param.view(-1)
-    start, end = 0, 1024
+    start, end = 0, 32*32
     diff = get_min_mean_max(torch.abs(param[:32*32] - param_ref[start:end]))
     print(f'param[{start}:{end}] {diff = }')
 
     param = all_weights[1][:, :32].clone()
     param = param.view(-1)
-    start, end = 4096, 6144
+    start, end = 64*64, 64*64+64*32
     diff = get_min_mean_max(torch.abs(param[:64*32] - param_ref[start:end]))
     print(f'param[{start}:{end}] {diff = }')
 
     param = all_weights[2].clone()
     param = param.view(-1)
-    start, end = 8192, 8192+2 # only compare first 2 (of all 64*1) elements because of the padding
-    diff = get_min_mean_max(torch.abs(param[:2] - param_ref[start:end]))
+    start, end = 64*64*2, 64*64*2+1*64
+    diff = get_min_mean_max(torch.abs(param[:64] - param_ref[start:end]))
     print(f'param[{start}:{end}] {diff = }')
 
     # compare Encoding weights
     if model_param is None:
         return
-    start, end = 12288, 12288+1024
+    start, end = 64*64*3, 64*64*3+1024	# check first 1024 values
     diff = get_min_mean_max(torch.abs(model_param[start:end].view(-1) - param_ref[start:end]))
     print(f'param[{start}:{end}] {diff = }')
-    start, end = 360000, 360000+1024	# some middle params
+    start, end = 360000, 360000+1024	# check some middle params
     diff = get_min_mean_max(torch.abs(model_param[start:end].view(-1) - param_ref[start:end]))
     print(f'param[{start}:{end}] {diff = }')
-    start, end = 720656-1024, 720656
+    start, end = 720656-1024, 720656	# check last 1024 values
     diff = get_min_mean_max(torch.abs(model_param[start:end].view(-1) - param_ref[start:end]))
     print(f'param[{start}:{end}] {diff = }')
 
@@ -375,6 +360,28 @@ if __name__ == "__main__":
         if device == 'cuda':
             model_param_current = model.params.data.clone()
         elif device == 'xpu':
+            step = i
+            if step == -1:
+                ref_tensor = torch.load(f'{save_path}/networkwithencoding-step.pth')
+            else:
+                if not os.path.exists(f'{save_path}/networkwithencoding-step{step}.pth'):
+                    print(f'Error: {save_path}/networkwithencoding-step{step}.pth file does not existed, leaving...')
+                    sys.exit(-1)
+                ref_tensor = torch.load(f'{save_path}/networkwithencoding-step{step}.pth')
+
+            for k,v in ref_tensor.items():
+                if isinstance(v, torch.Tensor):
+                    ref_tensor[k] = v.to(dtype=torch.float).to(device)
+
+            model = tcnn.NetworkWithInputEncoding(
+                n_input_dims=2,
+                n_output_dims=n_channels,
+                encoding_config=config["encoding"],
+                network_config=config["network"],
+                init_params=ref_tensor['model_param'].to(device),
+            ).to(device)
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+
             batch, output_ref, targets, loss_ref, grad_ref, model_param_update_ref = load_networkwithencoding(model, step=i)
 
         output = model(batch)
