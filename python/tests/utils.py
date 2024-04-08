@@ -1,5 +1,7 @@
 import numpy as np
-
+import os
+import sys
+sys.path.append(os.path.dirname(__file__))
 from mlp import MLP
 
 from tiny_dpcpp_nn import Network, NetworkWithInputEncoding

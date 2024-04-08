@@ -37,7 +37,7 @@ import time
 
 torch.manual_seed(0)
 torch.use_deterministic_algorithms(True)
-
+torch.set_printoptions(precision=6)
 
 SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts")
 sys.path.insert(0, SCRIPTS_DIR)
@@ -136,22 +136,24 @@ def pad_model_param(model_param):
     )
     return model_param_new
 
-def save_networkwithencoding(model_param, model_param_update=None, encoding_input=None, network_output=None, targets=None, loss=None, step=-1):
+def save_networkwithencoding(model_param, model_param_grad, model_param_update=None, encoding_input=None, network_output=None, targets=None, loss=None, step=-1):
     print(f'CUDA save_networkwithencoding {step = }')
     save_path = 'dump_cuda'
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
     model_param = pad_model_param(model_param.to('cpu'))
+    model_param_grad = pad_model_param(model_param_grad.to('cpu'))
     model_param_update = pad_model_param(model_param_update.to('cpu'))
 
     print(f'--> {model_param.shape = }')
-    print(f'--> {network_output = }')
+    print(f'--> {model_param_grad.shape = }')
 
     save_tensor = {
         'step': step,
         'loss': loss,
         'model_param': model_param.to('cpu'),
+        'model_param_grad': model_param_grad.to('cpu'),
         'model_param_update': model_param_update.to('cpu'),
         'encoding_input': encoding_input.to('cpu'),
         'network_output': network_output.to('cpu'),
@@ -164,14 +166,15 @@ def save_networkwithencoding(model_param, model_param_update=None, encoding_inpu
 
 
 def load_networkwithencoding(model, loss=None, step=-1):
-    print(f'XPU load_networkwithencoding {step = }')
+    #print(f'XPU load_networkwithencoding {step = }')
     save_path = 'dump_cuda'
 
     if step == -1:
         ref_tensor = torch.load(f'{save_path}/networkwithencoding-step.pth')
     else:
         if not os.path.exists(f'{save_path}/networkwithencoding-step{step}.pth'):
-            return
+            print(f'Error: {save_path}/networkwithencoding-step{step}.pth file does not existed, leaving...')
+            sys.exit(-1)
         ref_tensor = torch.load(f'{save_path}/networkwithencoding-step{step}.pth')
 
     for k,v in ref_tensor.items():
@@ -179,31 +182,35 @@ def load_networkwithencoding(model, loss=None, step=-1):
             ref_tensor[k] = v.to(dtype=torch.float).to(device)
 
     model_param_ref = ref_tensor['model_param']
+    model_param_grad_ref = ref_tensor['model_param_grad']
     model_param_update_ref = ref_tensor['model_param_update']
 
-    # network.reset_weights(weight_params)
     model.reset_weights(model_param_ref)
 
-    print(f'==> compare_model_param after reset_weights, {step = }')
+    print(f'--> {step = } compare model param after reset_weights')
     all_weights = model.get_reshaped_params(datatype=model.params.data.dtype)
     model_param = model.params.data.clone()
-    compare_model_param(all_weights, model_param, model_param_ref)
+    compare_model_param(all_weights, model_param_ref, model_param)
 
     batch = ref_tensor['encoding_input']
     output_ref = ref_tensor['network_output']
     targets = ref_tensor['targets']
     loss_ref = ref_tensor['loss']
 
-    return batch, output_ref, targets, loss_ref, model_param_update_ref
+    return batch, output_ref, targets, loss_ref, model_param_grad_ref, model_param_update_ref
 
 def get_min_mean_max(tensor):
-    t_min = tensor.min()
-    t_mean = tensor.mean()
-    t_max = tensor.max()
+    threshold = 1e-1
+    t_min = tensor.min().item()
+    t_mean = tensor.mean().item()
+    t_max = tensor.max().item()
 
+    #assert t_min  < threshold
+    #assert t_mean < threshold
+    #assert t_max  < threshold
     return t_min, t_mean, t_max
 
-def compare_model_param(all_weights, model_param, param_ref):
+def compare_model_param(all_weights, param_ref, model_param=None):
     # compare Network weights which has padding
     param = all_weights[0][:32, :32].clone()
     param = param.view(-1)
@@ -224,6 +231,8 @@ def compare_model_param(all_weights, model_param, param_ref):
     print(f'param[{start}:{end}] {diff = }')
 
     # compare Encoding weights
+    if model_param is None:
+        return
     start, end = 12288, 12288+1024
     diff = get_min_mean_max(torch.abs(model_param[start:end].view(-1) - param_ref[start:end]))
     print(f'param[{start}:{end}] {diff = }')
@@ -234,15 +243,19 @@ def compare_model_param(all_weights, model_param, param_ref):
     diff = get_min_mean_max(torch.abs(model_param[start:end].view(-1) - param_ref[start:end]))
     print(f'param[{start}:{end}] {diff = }')
 
-def compare_networkwithencoding(output, output_ref, loss, loss_ref, all_weights, model_param, model_param_ref, step=-1):
-    print(f'==> compare_networkwithencoding {step = }')
+def compare_networkwithencoding(output, output_ref, loss, loss_ref, param_list, model_param, model_param_ref, grad_list, grad_ref, step=-1):
+    print(f'--> {step = } compare_networkwithencoding')
     diff = get_min_mean_max(torch.abs(output - output_ref))
     print(f'output {diff = }')
     diff = get_min_mean_max(torch.abs(loss - loss_ref))
     print(f'loss {diff = }')
 
-    print(f'==> compare_model_param after backward {step = }')
-    compare_model_param(all_weights, model_param, model_param_ref)
+    print(f'--> {step = } compare model param after backward')
+    all_weights = param_list[0]
+    compare_model_param(all_weights, model_param_ref, model_param)
+    print(f'--> {step = } compare model grads after backward')
+    all_grads = grad_list[0]
+    compare_model_param(all_grads, grad_ref)
 
 if __name__ == "__main__":
 
@@ -276,6 +289,7 @@ if __name__ == "__main__":
         try:
             import intel_extension_for_pytorch as ipex
             import tiny_dpcpp_nn as tcnn
+            from tests.utils import get_grad_params
         except ImportError:
             print("This sample requires the tiny-dpcpp-nn extension for PyTorch.")
             print("You can install it by running:")
@@ -297,9 +311,6 @@ if __name__ == "__main__":
         encoding_config=config["encoding"],
         network_config=config["network"],
     ).to(device)
-
-    for name, param in model.named_parameters():
-        print(f'--> {name = } {param.shape = } {param.sum() = }')
 
     # ===================================================================================================
     # The following is equivalent to the above, but slower. Only use "naked" tcnn.Encoding and
@@ -364,7 +375,7 @@ if __name__ == "__main__":
         if device == 'cuda':
             model_param_current = model.params.data.clone()
         elif device == 'xpu':
-            batch, output_ref, targets, loss_ref, model_param_update_ref = load_networkwithencoding(model, step=i)
+            batch, output_ref, targets, loss_ref, grad_ref, model_param_update_ref = load_networkwithencoding(model, step=i)
 
         output = model(batch)
 
@@ -379,16 +390,23 @@ if __name__ == "__main__":
         # print("enc params min: ", model.params[64 * 64 * 3 :].min())
         # print("enc params max: ", model.params[64 * 64 * 3 :].max())
         optimizer.zero_grad()
+        print(f'--> before backward {model.params.data = }')
         loss.backward()
+        model_param_grad = model.params.grad.clone()
+        print(f'--> {model_param_grad = }')
+        print(f'--> {optimizer.param_groups[0]["lr"] = }')
         optimizer.step()
+        print(f'--> after  backward {model.params.data = }')
 
         loss_val = loss.item()
         model_param_update = model.params.data.clone()
         if device == 'cuda':
-            save_networkwithencoding(model_param_current, model_param_update=model_param_update, encoding_input=batch, network_output=output, targets=targets.to('cpu'), loss=loss_val, step=i)
+            save_networkwithencoding(model_param_current, model_param_grad=model_param_grad,
+               model_param_update=model_param_update, encoding_input=batch, network_output=output,
+               targets=targets.to('cpu'), loss=loss_val, step=i)
         elif device == 'xpu':
-            all_weights = model.get_reshaped_params(datatype=model.params.data.dtype)
-            compare_networkwithencoding(output, output_ref, loss, loss_ref, all_weights, model_param_update, model_param_update_ref, step=i)
+            grad_list, param_list = get_grad_params(model)
+            compare_networkwithencoding(output, output_ref, loss, loss_ref, param_list, model_param_update, model_param_update_ref, grad_list, grad_ref, step=i)
 
         # print("After enc params: ", model.params[64 * 64 * 3 :])
         # print("After enc params min: ", model.params[64 * 64 * 3 :].min())
